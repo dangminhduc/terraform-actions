@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v3.0.2
         with:
           repository: dangminhduc/terraform-actions
-          ref: v1
+          ref: v1.0.0
           path: ./.github
 
       - uses: ./.github/actions/{plan or apply}
