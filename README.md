@@ -41,5 +41,5 @@ jobs:
 |stage|Environment name(if you have multile environment)|stg or prod|
 |working-directory|Directory that contains terraform code|`envs/stg`or `envs/prod`|
 |terraform-version|Which terraform version to use|1.1.1|
-|execution-role|terraform実行するのIAMロール|arn:aws:iam::{account-id}:role/terraform-execution-role|
+|execution-role|IAM Role which terraform will use to make changes to your infrastructure|arn:aws:iam::{account-id}:role/terraform-execution-role|
 |github-token|For posting plan result in Pull Requests, the GITHUB_TOKEN is required|leave it as ${{ secrets.GITHUB_TOKEN }}|
