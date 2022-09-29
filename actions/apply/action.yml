@@ -1,0 +1,70 @@
+---
+name: apply
+description: 'Execute terraform apply'
+inputs:
+  stage:
+    required: true
+    description: 'The name of the environment. Might be stg or prod'
+  working-directory:
+    required: true
+    description: 'Terraform folder path.'
+  terraform-version:
+    required: true
+    description: 'Terraform version to be used.'
+  execution-role:
+    required: true
+    description: 'The IAM Role ARN for executing terraform commands. Authenticating by OIDC.'
+  project-name:
+    required: true
+    description: 'The name of the project.'
+  github-token:
+    required: true
+    description: 'The GitHub secrets token for posting and edit comments to the Pull Request.'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v3.0.2
+      with:
+        path: ./terraform-actions/
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1.6.1
+      with:
+        role-to-assume: ${{ inputs.execution-role }}
+        aws-region: ap-northeast-1
+        role-session-name: ${{ inputs.project-name }}-${{ inputs.project-name }}
+        role-skip-session-tagging: true
+        role-duration-seconds: 900
+
+    - name: setup Terraform
+      uses: hashicorp/setup-terraform@v2.0.0
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+
+    - name: Terraform format
+      id: fmt
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform fmt -no-color -check -recursive -diff
+
+    - name: Terraform Initialize
+      id: init
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform init -input=false
+
+    - name: Terraform Plan
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform plan -detailed-exitcode
+      continue-on-error: true
+
+    - name: Terraform Apply
+      id: apply
+      if: steps.init.outcome == 'success' && steps.plan.outputs.exitcode == 2 && steps.fmt.outcome == 'success'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform apply -auto-approve -no-color

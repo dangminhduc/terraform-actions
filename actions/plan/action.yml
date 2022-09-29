@@ -1,0 +1,178 @@
+---
+name: plan
+description: 'Execute terraform plan'
+inputs:
+  stage:
+    required: true
+    description: 'The name of the environment. Might be stg or prod'
+  working-directory:
+    required: true
+    description: 'Terraform folder path.'
+  terraform-version:
+    required: true
+    description: 'Terraform version to be used.'
+  execution-role:
+    required: true
+    description: 'The IAM Role ARN for executing terraform commands. Authenticating by OIDC.'
+  project-name:
+    required: true
+    description: 'The name of the project.'
+  github-token:
+    required: true
+    description: 'The GitHub secrets token for posting and edit comments to the Pull Request.'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v3.0.2
+      with:
+        path: ./terraform-actions/
+
+    - name: Remove tf diff label
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const target = `has-${{ inputs.stage }}-tf-diff`
+          const { data: pullLabels } = await github.rest.issues.listLabelsOnIssue({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+          });
+          const label = pullLabels.find(label => {
+            return label.name === target
+          });
+          if(label) {
+            github.rest.issues.removeLabel({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: target
+            });
+          }
+
+    - name: Assume Role for OIDC
+      uses: aws-actions/configure-aws-credentials@v1.6.1
+      with:
+        role-to-assume: ${{ inputs.execution-role }}
+        aws-region: ap-northeast-1
+        role-session-name: ${{ inputs.project-name }}-${{ inputs.project-name }}
+        role-skip-session-tagging: true
+        role-duration-seconds: 900
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2.0.0
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+
+    - name: Terraform Init
+      id: init
+      shell: bash
+      run: terraform init
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Terraform Validate
+      id: validate
+      shell: bash
+      run: terraform validate -no-color
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Terraform Plan
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform plan -input=false -no-color -detailed-exitcode -out=tfplan
+      continue-on-error: true
+
+    - name: Terraform Plan show
+      working-directory: ${{ inputs.working-directory }}
+      if: steps.plan.outputs.exitcode == 2 || steps.plan.outputs.exitcode == 0
+      shell: bash
+      id: show
+      run: terraform show -no-color tfplan
+
+    - name: Reformat Plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: echo '${{ steps.show.outputs.stdout || steps.plan.outputs.stderr }}' | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
+
+    - name: Put Plan in Environment Variables
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        PLAN=$(cat plan.txt)
+        echo "PLAN<<EOF" >> $GITHUB_ENV
+        echo "$PLAN" >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+
+    - uses: actions/github-script@v6.1.0
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          // 1. Retrieve existing bot comments for the PR
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes(`## Plan ${{ inputs.stage }}`)
+          })
+
+          // 2. Prepare format of the comment
+          const output = `## Plan ${{ inputs.stage }}
+          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+          <details><summary>Validation Output</summary>
+
+          \`\`\`\n
+          ${{ steps.validate.outputs.stdout }}
+          \`\`\`
+
+          </details>
+
+          #### Terraform Plan 📖
+
+          <details><summary>Show Plan</summary>
+
+          \`\`\`diff\n
+          ${process.env.PLAN}
+          \`\`\`
+
+          </details>
+
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`envs/${{ inputs.stage }}\`, Workflow: \`${{ github.workflow }}\`, Commit Hash: \`${{ github.event.pull_request.head.sha }}\`*`;
+
+          // 3. If we have a comment, update it, otherwise create a new one
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }
+
+    - name: Terraform Plan Status
+      if: steps.plan.outputs.exitcode == 1
+      shell: bash
+      run: exit 1
+
+    - name: Add tf diff label
+      if: steps.plan.outputs.exitcode == 2
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.addLabels({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            labels: [`has-${{ inputs.stage }}-tf-diff`]
+          })
