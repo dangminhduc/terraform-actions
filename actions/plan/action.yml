@@ -4,9 +4,9 @@ description: 'Execute terraform plan'
 inputs:
   stage:
     required: true
-    description: 'The name of the environment. Might be stg or prod'
+    description: 'The name of environment. stg or prod accordingly'
   working-directory:
-    required: true
+    required: false
     description: 'Terraform folder path.'
   terraform-version:
     required: true
@@ -25,7 +25,7 @@ runs:
   using: "composite"
   steps:
     - name: Checkout
-      uses: actions/checkout@v3.0.2
+      uses: actions/checkout@v3.3.0
       with:
         path: ./terraform-actions/
 
@@ -33,7 +33,7 @@ runs:
       uses: actions/github-script@v6
       with:
         script: |
-          const target = `has-${{ inputs.stage }}-tf-diff`
+          const target = `${{ inputs.stage }}`
           const { data: pullLabels } = await github.rest.issues.listLabelsOnIssue({
             issue_number: context.issue.number,
             owner: context.repo.owner,
@@ -52,7 +52,7 @@ runs:
           }
 
     - name: Assume Role for OIDC
-      uses: aws-actions/configure-aws-credentials@v1.6.1
+      uses: aws-actions/configure-aws-credentials@v1.7.0
       with:
         role-to-assume: ${{ inputs.execution-role }}
         aws-region: ap-northeast-1
@@ -61,31 +61,42 @@ runs:
         role-duration-seconds: 900
 
     - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2.0.0
+      uses: hashicorp/setup-terraform@v2.0.3
       with:
         terraform_version: ${{ inputs.terraform-version }}
+
+    - name: Determine working directory
+      id: determine-working-directory
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.working-directory }}" ]
+        then
+          echo "working_directory=./envs/${{ inputs.stage }} }}" >> $GITHUB_ENV
+        else
+          echo "working_directory=${{ inputs.working-directory }}" >> $GITHUB_ENV
+        fi
 
     - name: Terraform Init
       id: init
       shell: bash
       run: terraform init
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
 
     - name: Terraform Validate
       id: validate
       shell: bash
       run: terraform validate -no-color
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
 
     - name: Terraform Plan
       id: plan
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: terraform plan -input=false -no-color -detailed-exitcode -out=tfplan
       continue-on-error: true
 
     - name: Terraform Plan show
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       if: steps.plan.outputs.exitcode == 2 || steps.plan.outputs.exitcode == 0
       shell: bash
       id: show
@@ -93,19 +104,19 @@ runs:
 
     - name: Reformat Plan
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: echo '${{ steps.show.outputs.stdout || steps.plan.outputs.stderr }}' | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
 
     - name: Put Plan in Environment Variables
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: |
         PLAN=$(cat plan.txt)
         echo "PLAN<<EOF" >> $GITHUB_ENV
         echo "$PLAN" >> $GITHUB_ENV
         echo "EOF" >> $GITHUB_ENV
 
-    - uses: actions/github-script@v6.1.0
+    - uses: actions/github-script@v6.3.3
       with:
         github-token: ${{ inputs.github-token }}
         script: |
@@ -116,11 +127,11 @@ runs:
             issue_number: context.issue.number,
           })
           const botComment = comments.find(comment => {
-            return comment.user.type === 'Bot' && comment.body.includes(`## Plan ${{ inputs.stage }}`)
+            return comment.user.type === 'Bot' && comment.body.includes(`## Plan ${{ env.working_directory }}\n`)
           })
 
           // 2. Prepare format of the comment
-          const output = `## Plan ${{ inputs.stage }}
+          const output = `## Plan ${{ env.working_directory }}
           #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
           #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
           <details><summary>Validation Output</summary>
@@ -135,15 +146,78 @@ runs:
 
           <details><summary>Show Plan</summary>
 
-          \`\`\`diff\n
+          \`\`\`terraform\n
           ${process.env.PLAN}
           \`\`\`
 
           </details>
 
-          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`envs/${{ inputs.stage }}\`, Workflow: \`${{ github.workflow }}\`, Commit Hash: \`${{ github.event.pull_request.head.sha }}\`*`;
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.working_directory }}\`, Workflow: \`${{ github.workflow }}\`, Commit Hash: \`${{ github.event.pull_request.head.sha }}\`*`;
 
           // 3. If we have a comment, update it, otherwise create a new one
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }
+
+    - name: workspace_conflict_checker
+      if: steps.plan.outputs.exitcode == 2
+      uses: actions/github-script@v6.3.3
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          // 0. Retrieve existing bot comments for the PR
+          const { data: comments } = await github.rest.issues.listComments({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes(`## Workspace conflict check for ${{ inputs.stage }}`)
+          })
+          // 1. Retrieve all issues that have the same label
+          const { data: issues } = await github.rest.issues.listForRepo({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          state: 'open',
+          labels: '${{ inputs.stage }}'
+          })
+          // 2. Get current issue object
+          const current_issue = issues.find(issue => {
+            return issue.number === context.issue.number
+          })
+          // Remove current issue from array of issues
+          const index = issues.indexOf(current_issue);
+          if (index > -1) {
+            issues.splice(index, 1);
+          }
+          // 2. Prepare comment
+          var output = ""
+          if (issues.length > 0) {
+            output = `## Workspace conflict check for ${{ inputs.stage }}
+            下記のPRは\`${{ inputs.stage }}\`ワークスペースに対して未apply変更があります。
+            Applyの際に十分ご注意ください。\n`
+
+            + issues[0].html_url +
+
+            `
+            - このPRを先にapplyする場合、マージした後、` + issues[0].html_url + ` の作業者までrebase依頼を連絡してください。
+            - または上記のPRが先にapplyされた場合、このPRをrebaseしてください。planのワークフローが自動で実行されます。`;
+          } else {
+            output = `## Workspace conflict check for ${{ inputs.stage }}
+            \`${{ inputs.stage }}\`ワークスペースに対して他のPRで未apply変更がありません。`;
+          }
           if (botComment) {
             github.rest.issues.updateComment({
               owner: context.repo.owner,
@@ -174,5 +248,5 @@ runs:
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            labels: [`has-${{ inputs.stage }}-tf-diff`]
+            labels: [`${{ inputs.stage }}`]
           })

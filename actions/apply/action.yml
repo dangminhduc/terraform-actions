@@ -4,9 +4,9 @@ description: 'Execute terraform apply'
 inputs:
   stage:
     required: true
-    description: 'The name of the environment. Might be stg or prod'
+    description: 'The name of environment. stg or prod accordingly'
   working-directory:
-    required: true
+    required: false
     description: 'Terraform folder path.'
   terraform-version:
     required: true
@@ -25,12 +25,12 @@ runs:
   using: "composite"
   steps:
     - name: Checkout Repo
-      uses: actions/checkout@v3.0.2
+      uses: actions/checkout@v3.3.0
       with:
         path: ./terraform-actions/
 
     - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v1.6.1
+      uses: aws-actions/configure-aws-credentials@v1.7.0
       with:
         role-to-assume: ${{ inputs.execution-role }}
         aws-region: ap-northeast-1
@@ -38,27 +38,38 @@ runs:
         role-skip-session-tagging: true
         role-duration-seconds: 900
 
-    - name: setup Terraform
-      uses: hashicorp/setup-terraform@v2.0.0
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2.0.3
       with:
         terraform_version: ${{ inputs.terraform-version }}
+
+    - name: Determine working directory
+      id: determine-working-directory
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.working-directory }}" ]
+        then
+          echo "working_directory=./envs/${{ inputs.stage }} }}" >> $GITHUB_ENV
+        else
+          echo "working_directory=${{ inputs.working-directory }}" >> $GITHUB_ENV
+        fi
 
     - name: Terraform format
       id: fmt
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: terraform fmt -no-color -check -recursive -diff
 
     - name: Terraform Initialize
       id: init
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: terraform init -input=false
 
     - name: Terraform Plan
       id: plan
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: terraform plan -detailed-exitcode
       continue-on-error: true
 
@@ -66,5 +77,5 @@ runs:
       id: apply
       if: steps.init.outcome == 'success' && steps.plan.outputs.exitcode == 2 && steps.fmt.outcome == 'success'
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ env.working_directory }}
       run: terraform apply -auto-approve -no-color
